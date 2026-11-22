@@ -38,7 +38,11 @@ def _to_response(report: RcaReport) -> RcaReportResponse:
         severity=report.severity,
         root_cause=report.root_cause,
         evidence=[
-            RcaEvidenceClaimResponse(claim=item.claim, source_ids=list(item.source_ids))
+            RcaEvidenceClaimResponse(
+                category=item.category,
+                claim=item.claim,
+                source_ids=list(item.source_ids),
+            )
             for item in report.evidence_claims
         ],
         impact=report.impact,
@@ -47,6 +51,8 @@ def _to_response(report: RcaReport) -> RcaReportResponse:
         confidence_score=report.confidence,
         limitations=list(report.limitations),
         sources=[_to_source(source) for source in report.evidence],
+        consistency_score=report.consistency_score,
+        degraded=report.degraded,
     )
 
 

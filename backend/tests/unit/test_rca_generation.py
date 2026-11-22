@@ -4,10 +4,11 @@ from dataclasses import replace
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from backend.app.application.dto.rag import RagSearchResult, RetrievalQuery
-from backend.app.application.dto.rca import GenerateRcaCommand
-from backend.app.application.exceptions import InvalidQueryError, UpstreamTimeoutError
+from backend.app.application.dto.rca import GenerateRcaCommand, RcaGeneratedEvidence
+from backend.app.application.exceptions import InvalidQueryError
 from backend.app.application.services.rca_generation import DefaultRcaGenerationService
 from backend.app.domain.entities.rca_report import RcaReport
 from backend.app.domain.value_objects.evidence import EvidenceReference
@@ -18,7 +19,7 @@ class FakeRagService:
     def __init__(self, sources: Sequence[EvidenceReference]) -> None:
         self.result = RagSearchResult(
             query="why did production fail?",
-            context="retrieved evidence context",
+            context="\n\n".join(source.excerpt for source in sources),
             sources=tuple(sources),
         )
         self.queries: list[RetrievalQuery] = []
@@ -102,10 +103,25 @@ def _source(source_file: str) -> EvidenceReference:
         chunk_id=str(uuid4()),
         title=source_file,
         source_uri=None,
-        excerpt=f"Evidence from {source_file}",
+        excerpt=(
+            "Connection pool exhausted. Database connection timed out. "
+            "Service unavailable. Requests failed. Severity P2."
+        ),
         source_file=source_file,
         start_line=10,
         end_line=15,
+    )
+
+
+def _quality_source(source_file: str = "db_failure.log") -> EvidenceReference:
+    return replace(
+        _source(source_file),
+        excerpt=(
+            "ERROR Database connection timeout\n"
+            "ERROR Connection pool exhausted\n"
+            "ERROR Service unavailable\n"
+            "ERROR Request processing failed"
+        ),
     )
 
 
@@ -116,11 +132,32 @@ def _output(source_id: str) -> str:
             "root_cause": "The connection pool was exhausted.",
             "evidence": [
                 {
-                    "claim": "Connections timed out while acquiring a database connection.",
+                    "category": "root_cause",
+                    "claim": "Connection pool exhausted.",
                     "source_ids": [source_id],
-                }
+                },
+                {
+                    "category": "symptom",
+                    "claim": "Database connection timed out.",
+                    "source_ids": [source_id],
+                },
+                {
+                    "category": "impact",
+                    "claim": "Service unavailable.",
+                    "source_ids": [source_id],
+                },
+                {
+                    "category": "consequence",
+                    "claim": "Requests failed.",
+                    "source_ids": [source_id],
+                },
+                {
+                    "category": "severity",
+                    "claim": "Severity P2.",
+                    "source_ids": [source_id],
+                },
             ],
-            "impact": "Requests depending on the database failed.",
+            "impact": "The service was unavailable.",
             "recommendations": ["Review database pool limits."],
             "preventive_actions": ["Alert on pool saturation."],
             "confidence_score": 0.78,
@@ -134,6 +171,7 @@ def _service(
     chat: FakeChatGenerator,
     *,
     max_attempts: int = 2,
+    report_repository: FakeRcaReportRepository | None = None,
 ) -> DefaultRcaGenerationService:
     return DefaultRcaGenerationService(
         rag,
@@ -141,6 +179,7 @@ def _service(
         timeout_seconds=1,
         max_attempts=max_attempts,
         retry_backoff_seconds=0,
+        report_repository=report_repository,
     )
 
 
@@ -157,8 +196,9 @@ async def test_rca_generation_maps_only_valid_retrieved_citations() -> None:
     )
     incident_id = uuid4()
     document_id = uuid4()
+    repository = FakeRcaReportRepository()
 
-    report = await _service(rag, chat).generate(
+    report = await _service(rag, chat, report_repository=repository).generate(
         GenerateRcaCommand(
             incident_id=incident_id,
             question="Why did production fail?",
@@ -169,14 +209,113 @@ async def test_rca_generation_maps_only_valid_retrieved_citations() -> None:
     assert len(chat.prompts) == 2
     assert "failed JSON or citation validation" in chat.prompts[1]
     assert "properties" in chat.schemas[0]
+    evidence_schema = chat.schemas[0]["$defs"]["RcaGeneratedEvidence"]
+    source_ids_schema = evidence_schema["properties"]["source_ids"]
+    assert source_ids_schema["items"]["enum"] == [
+        first_source.chunk_id,
+        unused_source.chunk_id,
+    ]
+    assert source_ids_schema["uniqueItems"] is True
+    assert chat.schemas[0]["properties"]["severity"]["enum"] == [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "unknown",
+    ]
     assert rag.queries[0].incident_id == incident_id
     assert rag.queries[0].document_ids == (document_id,)
     assert report.incident_id == incident_id
     assert report.root_cause == "The connection pool was exhausted."
     assert report.severity == "P2"
     assert report.confidence == 0.78
+    assert report.limitations == ()
     assert report.evidence_claims[0].source_ids == (first_source.chunk_id,)
+    assert report.evidence_claims[0].category == "root_cause"
     assert [source.chunk_id for source in report.evidence] == [first_source.chunk_id]
+    assert repository.saved == [report]
+
+
+def test_generated_evidence_deduplicates_source_ids() -> None:
+    evidence = RcaGeneratedEvidence(
+        category="root_cause",
+        claim="Connection pool exhausted.",
+        source_ids=["chunk-1", " chunk-1 "],
+    )
+
+    assert evidence.source_ids == ["chunk-1"]
+
+
+def test_generated_evidence_rejects_empty_source_ids() -> None:
+    with pytest.raises(ValidationError, match="must not contain empty IDs"):
+        RcaGeneratedEvidence(
+            category="root_cause",
+            claim="Connection pool exhausted.",
+            source_ids=[" "],
+        )
+
+
+@pytest.mark.anyio
+async def test_rca_generation_accepts_repeated_valid_citations_once() -> None:
+    source = _source("payments.log")
+    response = json.loads(_output(source.chunk_id))
+    for evidence in response["evidence"]:
+        evidence["source_ids"] = [source.chunk_id, source.chunk_id]
+    chat = FakeChatGenerator([json.dumps(response)])
+
+    report = await _service(FakeRagService([source]), chat).generate(
+        GenerateRcaCommand(incident_id=uuid4(), question="Why did production fail?")
+    )
+
+    assert all(
+        evidence.source_ids == (source.chunk_id,)
+        for evidence in report.evidence_claims
+    )
+
+
+@pytest.mark.anyio
+async def test_rca_generation_normalizes_known_evidence_categories() -> None:
+    source = _source("payments.log")
+    response = json.loads(_output(source.chunk_id))
+    response["evidence"][0]["category"] = "symptom"
+    response["evidence"][2]["category"] = "consequence"
+    chat = FakeChatGenerator([json.dumps(response)])
+
+    report = await _service(FakeRagService([source]), chat).generate(
+        GenerateRcaCommand(incident_id=uuid4(), question="Why did production fail?")
+    )
+
+    assert [claim.category for claim in report.evidence_claims] == [
+        "root_cause",
+        "symptom",
+        "impact",
+        "consequence",
+        "severity",
+    ]
+
+
+@pytest.mark.anyio
+async def test_rca_generation_assigns_severity_from_retrieved_evidence() -> None:
+    source = replace(
+        _source("payments.log"),
+        excerpt="Connection pool exhausted. Database connection timed out.",
+    )
+    rag = FakeRagService([source])
+    chat = FakeChatGenerator([_output(source.chunk_id), _output(source.chunk_id)])
+
+    report = await _service(rag, chat).generate(
+        GenerateRcaCommand(incident_id=uuid4(), question="Why did production fail?")
+    )
+
+    assert report.severity == "P2"
+    assert report.degraded is True
+    assert chat.schemas[0]["properties"]["severity"]["enum"] == [
+        "P1",
+        "P2",
+        "P3",
+        "P4",
+        "unknown",
+    ]
 
 
 @pytest.mark.anyio
@@ -222,14 +361,62 @@ async def test_rca_without_evidence_is_persisted_for_history() -> None:
 
 
 @pytest.mark.anyio
-async def test_rca_generation_surfaces_exhausted_model_timeouts() -> None:
+async def test_rca_generation_returns_degraded_report_after_model_timeouts() -> None:
     rag = FakeRagService([_source("payments.log")])
-    chat = FakeChatGenerator([TimeoutError(), TimeoutError()])
+    chat = FakeChatGenerator([TimeoutError(), TimeoutError(), TimeoutError()])
 
-    with pytest.raises(UpstreamTimeoutError):
-        await _service(rag, chat).generate(
-            GenerateRcaCommand(incident_id=uuid4(), question="Why did production fail?")
-        )
+    report = await _service(rag, chat, max_attempts=3).generate(
+        GenerateRcaCommand(incident_id=uuid4(), question="Why did production fail?")
+    )
+
+    assert report.degraded is True
+    assert len(chat.prompts) == 3
+    assert any("deterministic fallback" in item for item in report.limitations)
+
+
+@pytest.mark.anyio
+async def test_rca_generation_degrades_after_invalid_citations_are_retried() -> None:
+    source = _quality_source()
+    rag = FakeRagService([source])
+    chat = FakeChatGenerator(
+        [
+            _output("unknown-source-id"),
+            _output("unknown-source-id"),
+            _output("unknown-source-id"),
+        ]
+    )
+
+    report = await _service(rag, chat, max_attempts=3).generate(
+        GenerateRcaCommand(incident_id=uuid4(), question="Why did production fail?")
+    )
+
+    assert report.degraded is True
+    assert len(chat.prompts) == 3
+    assert report.severity == "P2"
+    assert report.root_cause == "ERROR Connection pool exhausted"
+    assert all(
+        source_id == source.chunk_id
+        for claim in report.evidence_claims
+        for source_id in claim.source_ids
+    )
+    assert report.recommendations
+    assert report.preventive_actions
+    assert report.consistency_score >= 90
+
+
+@pytest.mark.anyio
+async def test_rca_generation_exposes_pydantic_fields_without_input_values() -> None:
+    source = _source("payments.log")
+    invalid_output = json.loads(_output(source.chunk_id))
+    invalid_output["severity"] = "P5"
+    chat = FakeChatGenerator([json.dumps(invalid_output), json.dumps(invalid_output)])
+
+    report = await _service(FakeRagService([source]), chat).generate(
+        GenerateRcaCommand(incident_id=uuid4(), question="Why did production fail?")
+    )
+
+    assert report.degraded is True
+    assert report.severity == "P2"
 
 
 @pytest.mark.anyio

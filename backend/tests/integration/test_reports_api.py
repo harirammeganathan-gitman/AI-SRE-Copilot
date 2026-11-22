@@ -64,11 +64,15 @@ async def test_report_history_and_detail_endpoints(client: AsyncClient, app: Fas
     assert len(body["items"]) == 1
     assert body["items"][0]["report_id"] == str(report_service.report.report_id)
     assert body["items"][0]["version"] == 2
+    assert body["items"][0]["consistency_score"] == 0
+    assert body["items"][0]["degraded"] is False
     assert body["next_cursor"] is None
 
     detail = await client.get(f"/api/v1/rca-reports/{report_service.report.report_id}")
     assert detail.status_code == 200
     assert detail.json()["root_cause"] == report_service.report.root_cause
+    assert detail.json()["consistency_score"] == report_service.report.consistency_score
+    assert detail.json()["degraded"] is False
 
     missing = await client.get(f"/api/v1/rca-reports/{uuid4()}")
     assert missing.status_code == 404

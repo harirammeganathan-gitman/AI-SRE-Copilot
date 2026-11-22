@@ -4,6 +4,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
+from backend.app.domain.value_objects.rca_evidence import RcaEvidenceCategory
 from backend.app.domain.value_objects.statuses import RcaReportStatus
 from backend.app.interfaces.api.schemas.common import ApiSchema
 from backend.app.interfaces.api.v1.schemas.rag import RagSource
@@ -20,6 +21,7 @@ class RcaGenerationRequest(ApiSchema):
 
 
 class RcaEvidenceClaimResponse(ApiSchema):
+    category: RcaEvidenceCategory | None = None
     claim: str = Field(min_length=1)
     source_ids: list[str] = Field(min_length=1)
 
@@ -35,6 +37,8 @@ class RcaReportResponse(ApiSchema):
     confidence_score: float = Field(ge=0.0, le=1.0)
     limitations: list[str]
     sources: list[RagSource]
+    consistency_score: int = Field(default=0, ge=0, le=100)
+    degraded: bool = False
 
 
 class RcaReportRecordResponse(RcaReportResponse):

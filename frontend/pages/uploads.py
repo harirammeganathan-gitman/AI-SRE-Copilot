@@ -94,8 +94,12 @@ def render() -> None:
         submitted = st.form_submit_button(
             "Upload and process",
             type="primary",
-            disabled=not files or incident_id is None,
         )
+
+    if submitted and incident_id is None:
+        st.warning("Create an incident before uploading logs.")
+    elif submitted and not files:
+        st.warning("Select at least one log file before uploading.")
 
     if submitted and files and incident_id is not None:
         progress = st.progress(0, text="Preparing uploads")

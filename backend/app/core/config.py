@@ -5,6 +5,11 @@ from urllib.parse import urlsplit
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+POSTGRES_COMMAND_TIMEOUT_SECONDS = 30
+CHROMA_QUERY_TIMEOUT_SECONDS = 60
+RCA_PROCESSING_MARGIN_SECONDS = 60
+RCA_POSTGRES_COMMAND_COUNT = 3
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -120,6 +125,19 @@ class Settings(BaseSettings):
             if not self.allowed_hosts or "*" in self.allowed_hosts:
                 raise ValueError("production requires explicit allowed hosts")
         return self
+
+    @property
+    def rca_request_timeout_seconds(self) -> float:
+        retry_delay = self.rca_retry_backoff_seconds * sum(
+            2**attempt for attempt in range(self.rca_max_attempts - 1)
+        )
+        return (
+            self.rca_timeout_seconds * (self.rca_max_attempts + 1)
+            + retry_delay
+            + CHROMA_QUERY_TIMEOUT_SECONDS
+            + RCA_POSTGRES_COMMAND_COUNT * POSTGRES_COMMAND_TIMEOUT_SECONDS
+            + RCA_PROCESSING_MARGIN_SECONDS
+        )
 
 
 @lru_cache(maxsize=1)

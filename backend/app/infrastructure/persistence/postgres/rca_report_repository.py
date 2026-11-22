@@ -17,7 +17,7 @@ from backend.app.domain.value_objects.statuses import RcaReportStatus
 _REPORT_COLUMNS = """
     report_id, incident_id, status, version, generated_at, root_cause, evidence,
     impact, resolution, preventive_actions, confidence, limitations, severity,
-    recommendations, evidence_claims
+    recommendations, evidence_claims, consistency_score, degraded
 """
 
 
@@ -46,11 +46,12 @@ class PostgresRcaReportRepository:
                     INSERT INTO rca_reports (
                         report_id, incident_id, status, version, generated_at, root_cause,
                         evidence, impact, resolution, preventive_actions, confidence,
-                        limitations, severity, recommendations, evidence_claims
+                        limitations, severity, recommendations, evidence_claims,
+                        consistency_score, degraded
                     )
                     VALUES (
                         $1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10::jsonb,
-                        $11, $12::jsonb, $13, $14::jsonb, $15::jsonb
+                        $11, $12::jsonb, $13, $14::jsonb, $15::jsonb, $16, $17
                     )
                     """,
                     saved_report.report_id,
@@ -69,10 +70,16 @@ class PostgresRcaReportRepository:
                     json.dumps(list(saved_report.recommendations)),
                     json.dumps(
                         [
-                            {"claim": item.claim, "source_ids": list(item.source_ids)}
+                            {
+                                "category": item.category,
+                                "claim": item.claim,
+                                "source_ids": list(item.source_ids),
+                            }
                             for item in saved_report.evidence_claims
                         ]
                     ),
+                    saved_report.consistency_score,
+                    saved_report.degraded,
                 )
         return saved_report
 
@@ -195,9 +202,12 @@ class PostgresRcaReportRepository:
                 RcaEvidenceClaim(
                     claim=str(item["claim"]),
                     source_ids=tuple(str(source_id) for source_id in item["source_ids"]),
+                    category=item.get("category"),
                 )
                 for item in claims
             ),
+            consistency_score=row["consistency_score"],
+            degraded=row["degraded"],
         )
 
     @staticmethod

@@ -4,9 +4,17 @@ import pytest
 from frontend.api_client import ApiClient, ApiClientError
 
 
-def _client(handler: httpx.MockTransport) -> ApiClient:
+def _client(
+    handler: httpx.MockTransport,
+    *,
+    rca_request_timeout_seconds: float = 600,
+) -> ApiClient:
     http_client = httpx.Client(base_url="http://api.test", transport=handler)
-    return ApiClient("http://api.test", http_client=http_client)
+    return ApiClient(
+        "http://api.test",
+        rca_request_timeout_seconds=rca_request_timeout_seconds,
+        http_client=http_client,
+    )
 
 
 def test_health_returns_unready_dependency_status() -> None:
@@ -57,6 +65,60 @@ def test_api_errors_use_backend_message_and_status() -> None:
         client.close()
 
 
+def test_api_errors_include_rca_validation_detail() -> None:
+    client = _client(
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                503,
+                json={
+                    "error": {
+                        "code": "SERVICE_UNAVAILABLE",
+                        "message": "RCA generation failed",
+                        "details": {
+                            "validation_error": "evidence must cite a retrieved chunk"
+                        },
+                    }
+                },
+            )
+        )
+    )
+    try:
+        with pytest.raises(ApiClientError, match="evidence must cite a retrieved chunk"):
+            client.generate_rca(incident_id="incident-1", question="Why?")
+    finally:
+        client.close()
+
+
+def test_api_errors_include_safe_pydantic_validation_details() -> None:
+    client = _client(
+        httpx.MockTransport(
+            lambda request: httpx.Response(
+                503,
+                json={
+                    "error": {
+                        "code": "SERVICE_UNAVAILABLE",
+                        "message": "RCA generation failed",
+                        "details": {
+                            "validation_errors": [
+                                {
+                                    "location": "severity",
+                                    "message": "Input should be P1, P2, P3, P4, or unknown",
+                                    "type": "literal_error",
+                                }
+                            ]
+                        },
+                    }
+                },
+            )
+        )
+    )
+    try:
+        with pytest.raises(ApiClientError, match="severity: Input should be P1"):
+            client.generate_rca(incident_id="incident-1", question="Why?")
+    finally:
+        client.close()
+
+
 def test_generation_uses_extended_timeout_and_incident_route() -> None:
     requests: list[httpx.Request] = []
 
@@ -75,6 +137,24 @@ def test_generation_uses_extended_timeout_and_incident_route() -> None:
 
     assert result == {"root_cause": "test"}
     assert requests[0].url.path == "/api/v1/incidents/incident-1/rca"
+    timeout = requests[0].extensions["timeout"]
+    assert timeout["read"] == 600
+    assert timeout["connect"] == 5
+
+
+def test_rca_timeout_errors_report_the_wait_duration() -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("simulated timeout", request=request)
+
+    client = _client(
+        httpx.MockTransport(handle),
+        rca_request_timeout_seconds=690.75,
+    )
+    try:
+        with pytest.raises(ApiClientError, match="Waited 690.75 seconds"):
+            client.generate_rca(incident_id="incident-1", question="Why?")
+    finally:
+        client.close()
 
 
 def test_incident_creation_and_listing_use_versioned_endpoints() -> None:

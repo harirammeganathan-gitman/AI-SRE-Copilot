@@ -1,12 +1,16 @@
 from dataclasses import dataclass
+from typing import Literal
 
 from backend.app.domain.exceptions import DomainValidationError
+
+RcaEvidenceCategory = Literal["root_cause", "symptom", "impact", "consequence", "severity"]
 
 
 @dataclass(frozen=True, slots=True)
 class RcaEvidenceClaim:
     claim: str
     source_ids: tuple[str, ...]
+    category: RcaEvidenceCategory | None = None
 
     def __post_init__(self) -> None:
         if not self.claim.strip():

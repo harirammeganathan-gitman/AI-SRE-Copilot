@@ -9,7 +9,11 @@ from backend.app.application.container import ServiceContainer
 from backend.app.application.services.document_embedding import OllamaChromaDocumentIndexer
 from backend.app.application.services.rag_retrieval import DefaultRagRetrievalService
 from backend.app.application.services.rca_generation import DefaultRcaGenerationService
-from backend.app.core.config import Settings
+from backend.app.core.config import (
+    CHROMA_QUERY_TIMEOUT_SECONDS,
+    POSTGRES_COMMAND_TIMEOUT_SECONDS,
+    Settings,
+)
 from backend.app.infrastructure.clients.chromadb.vector_store import (
     COLLECTION_NAME,
     ChromaVectorStore,
@@ -60,7 +64,7 @@ async def build_runtime_resources(settings: Settings) -> RuntimeResources:
             dsn=settings.database_url.get_secret_value(),
             min_size=0,
             max_size=10,
-            command_timeout=30,
+            command_timeout=POSTGRES_COMMAND_TIMEOUT_SECONDS,
         )
         postgres_repository = PostgresDocumentRepository(postgres_pool)
         incident_repository = PostgresIncidentRepository(postgres_pool)
@@ -88,6 +92,9 @@ async def build_runtime_resources(settings: Settings) -> RuntimeResources:
             host=chroma_url.hostname or "",
             port=chroma_url.port or (443 if chroma_url.scheme == "https" else 8000),
             ssl=chroma_url.scheme == "https",
+            settings=chromadb.Settings(
+                chroma_query_request_timeout_seconds=CHROMA_QUERY_TIMEOUT_SECONDS
+            ),
         )
         vector_store = ChromaVectorStore(
             chroma_client,

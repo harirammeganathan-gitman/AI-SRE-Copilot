@@ -4,10 +4,13 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from backend.app.domain.value_objects.rca_evidence import RcaEvidenceCategory
+
 
 class RcaGeneratedEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    category: RcaEvidenceCategory
     claim: str = Field(min_length=1, max_length=2000)
     source_ids: list[str] = Field(min_length=1, max_length=5)
 
@@ -23,9 +26,9 @@ class RcaGeneratedEvidence(BaseModel):
     @classmethod
     def validate_source_ids(cls, values: list[str]) -> list[str]:
         normalized = [value.strip() for value in values]
-        if any(not value for value in normalized) or len(set(normalized)) != len(normalized):
-            raise ValueError("evidence source_ids must be non-empty and unique")
-        return normalized
+        if any(not value for value in normalized):
+            raise ValueError("evidence source_ids must not contain empty IDs")
+        return list(dict.fromkeys(normalized))
 
 
 class RcaGeneratedContent(BaseModel):
@@ -33,7 +36,7 @@ class RcaGeneratedContent(BaseModel):
 
     severity: Literal["P1", "P2", "P3", "P4", "unknown"]
     root_cause: str = Field(min_length=1, max_length=4000)
-    evidence: list[RcaGeneratedEvidence] = Field(min_length=1, max_length=20)
+    evidence: list[RcaGeneratedEvidence] = Field(max_length=20)
     impact: str = Field(min_length=1, max_length=4000)
     recommendations: list[str] = Field(max_length=20)
     preventive_actions: list[str] = Field(max_length=20)

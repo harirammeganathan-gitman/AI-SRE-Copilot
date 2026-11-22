@@ -44,3 +44,15 @@ def test_rca_report_rejects_invalid_confidence() -> None:
             generated_at=datetime.now(UTC),
             confidence=1.1,
         )
+
+
+def test_rca_report_rejects_invalid_consistency_score() -> None:
+    with pytest.raises(DomainValidationError, match="consistency score"):
+        RcaReport(
+            report_id=uuid4(),
+            incident_id=uuid4(),
+            status=RcaReportStatus.COMPLETED,
+            version=1,
+            generated_at=datetime.now(UTC),
+            consistency_score=101,
+        )

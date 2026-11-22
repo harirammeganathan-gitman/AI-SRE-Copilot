@@ -22,6 +22,21 @@ uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 The liveness endpoint is available at `/health/live`. Readiness reports
 PostgreSQL, ChromaDB, and both configured Ollama models.
 
+## Windows quick start
+
+From the repository root, double-click `start-ai-sre-copilot.bat` or run it
+from Command Prompt. It starts the existing PostgreSQL container if needed,
+starts Ollama and ChromaDB only when their health endpoints are unavailable,
+then starts FastAPI on port 8000 and Streamlit on port 8502. Each launched
+service gets its own window for logs. The script does not apply database
+migrations; apply migrations 001–004 once before the first API startup.
+
+Run `restart-ai-sre-copilot.bat` to restart only this project's FastAPI,
+ChromaDB, and Streamlit processes. It leaves the PostgreSQL container and
+Ollama running, and does not delete database or vector data. The restart script
+only stops listeners whose process command line belongs to this repository.
+Both scripts require Docker Desktop, the repository `.venv`, and `curl.exe`.
+
 ## Log ingestion boundary
 
 Create/list incidents with `POST /api/v1/incidents` and
@@ -41,6 +56,7 @@ starting the API:
 1. `database/postgres/migrations/001_document_ingestion.sql`
 2. `database/postgres/migrations/002_rca_reports.sql`
 3. `database/postgres/migrations/003_incidents.sql`
+4. `database/postgres/migrations/004_rca_quality.sql`
 
 The incident migration creates the incident registry and foreign keys from
 documents and RCA reports. Chunks are associated through their parent document;
@@ -83,8 +99,57 @@ and retried; if retrieval returns no sources, the service returns a
 low-confidence report that explicitly states the evidence is insufficient
 without calling the model.
 
+The RCA prompt distinguishes symptoms, underlying causes, impact, and
+consequences, and favors the deepest cause supported by evidence. When the
+evidence does not establish a cause, it instructs the model to set confidence
+at or below 0.30 and identify the missing evidence in `limitations`. Above 0.70,
+the prompt requires an affirmative root-cause statement while still allowing
+limitations about other unsupported details.
+
+The RCA validator runs before report persistence. Evidence claims must quote a
+cited retrieved source; the cited chunk must exist in the retrieval result.
+Claims are categorized as root cause, symptom, impact, consequence, or severity.
+Contradictory confidence/limitation statements, unsupported summaries, and
+misclassified database timeouts, service unavailability, or request failures
+are rejected and retried.
+
+Severity is assigned by a deterministic classifier, not accepted from the LLM:
+production-wide outages and multiple unavailable services map to P1; service
+unavailability, request failures, database timeouts, connection-pool exhaustion,
+and CrashLoopBackOff map to P2; high/network latency, partial degradation, and
+memory leaks map to P3; warnings without failure indicators map to P4. A
+determined root cause must have a known severity, actionable recommendations,
+and preventive actions. These actions are generated from the supported
+root-cause pattern and are suggestions, not claims that remediation has already
+occurred.
+
+After the configured three failed generation/validation attempts, the service
+returns and persists an explicitly marked degraded report when it can extract
+cited evidence deterministically. Its limitations identify the fallback and
+remaining unknowns. Each report stores a 0–100 consistency score based on root
+cause validity, citation support, recommendation quality, preventive-action
+quality, and severity assignment (25, 25, 15, 15, and 20 points respectively).
+Legacy rows receive a score of zero until regenerated.
+
+Example:
+
+| | Before (invalid when the source shows pool exhaustion) | After (source-supported) |
+| --- | --- | --- |
+| Root cause | Database timeout | Connection pool exhaustion |
+| Symptom | — | Database timeout |
+| Impact | — | Service unavailable |
+| Consequence | Request processing failed, reported as the root cause | Request processing failed |
+
+If the evidence only shows a database timeout and does not establish pool
+exhaustion, the RCA must instead say the cause is undetermined, use confidence
+at or below 0.30, and state what evidence is missing.
+
 `AI_SRE_RCA_TIMEOUT_SECONDS`, `AI_SRE_RCA_MAX_ATTEMPTS`, and
 `AI_SRE_RCA_RETRY_BACKOFF_SECONDS` configure model timeout and bounded retries.
+The Streamlit RCA request timeout is derived from these settings to cover the
+retrieval embedding call, ChromaDB query, incident/chunk/report database
+operations, all model attempts, retry backoff, and processing overhead;
+connection establishment remains capped at five seconds.
 Ollama must have both configured models available for readiness and operation.
 Successful RCA reports are persisted with an incident-scoped version number.
 The report history API provides cursor pagination through
@@ -105,7 +170,8 @@ UI at the API. The Dashboard shows PostgreSQL-backed counts and dependency
 readiness. Upload Logs accepts `.log`, `.txt`, and `.md` files; its upload
 history is scoped to the current Streamlit browser session. Incident
 Investigation exposes RAG search and cited RCA generation. RCA Reports browses
-the persisted report history, details, citations, and JSON downloads.
+the persisted report history, assessment and consistency score, organized
+findings, deduplicated citations, actions, limitations, and JSON downloads.
 The live dependency monitor is available at
 `http://localhost:8502/health` (or the configured Streamlit port); it refreshes FastAPI, PostgreSQL, ChromaDB, and
 Ollama model readiness every 10 seconds.
@@ -121,7 +187,7 @@ mypy backend
 ## Live end-to-end validation
 
 Start dependencies in this order: PostgreSQL, ChromaDB, and Ollama; apply
-migrations 001–003; then start FastAPI and Streamlit. Ollama must have both
+migrations 001–004; then start FastAPI and Streamlit. Ollama must have both
 `nomic-embed-text` and `llama3.1` available. For the current local setup, use
 the health URLs below:
 
@@ -212,7 +278,7 @@ text.
 
 Troubleshooting:
 
-- If readiness reports PostgreSQL unhealthy, confirm migrations 001–003 were
+- If readiness reports PostgreSQL unhealthy, confirm migrations 001–004 were
   applied and the API's database URL targets the expected database.
 - If upload returns 404, select an incident from the API/UI list; API calls use
   the UUID, not the display key.

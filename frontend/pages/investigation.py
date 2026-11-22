@@ -65,7 +65,10 @@ def render() -> None:
             st.warning("Enter an investigation question with at least three characters.")
         else:
             try:
-                with st.spinner("Retrieving evidence and generating RCA with Ollama..."):
+                with st.spinner(
+                    "Retrieving evidence and generating RCA with Ollama. "
+                    "This may take several minutes..."
+                ):
                     report = api.generate_rca(
                         incident_id=incident_id,
                         question=question.strip(),

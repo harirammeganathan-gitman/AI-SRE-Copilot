@@ -65,6 +65,17 @@ def test_rag_rerank_limit_must_not_exceed_retrieval_limit() -> None:
         )
 
 
+def test_rca_request_timeout_covers_embedding_and_model_retries() -> None:
+    settings = Settings(
+        _env_file=None,  # type: ignore[call-arg]
+        rca_timeout_seconds=120,
+        rca_max_attempts=3,
+        rca_retry_backoff_seconds=0.25,
+    )
+
+    assert settings.rca_request_timeout_seconds == pytest.approx(690.75)
+
+
 def test_api_base_url_must_be_an_origin_without_credentials_or_path() -> None:
     settings = Settings(
         _env_file=None,  # type: ignore[call-arg]

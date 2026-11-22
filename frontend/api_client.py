@@ -18,12 +18,16 @@ class ApiClient:
         *,
         api_prefix: str = "/api/v1",
         timeout_seconds: float = 30,
+        rca_request_timeout_seconds: float,
         http_client: httpx.Client | None = None,
     ) -> None:
         normalized_prefix = "/" + api_prefix.strip("/")
         if normalized_prefix == "/":
             raise ValueError("api_prefix must not be empty")
+        if rca_request_timeout_seconds <= 0:
+            raise ValueError("rca_request_timeout_seconds must be positive")
         self._api_prefix = normalized_prefix
+        self._rca_request_timeout_seconds = rca_request_timeout_seconds
         self._client = http_client or httpx.Client(
             base_url=base_url.rstrip("/"),
             timeout=httpx.Timeout(timeout_seconds, connect=5),
@@ -108,7 +112,7 @@ class ApiClient:
             "POST",
             f"{self._api_prefix}/incidents/{incident_id}/rca",
             json={"question": question},
-            timeout=180,
+            timeout=httpx.Timeout(self._rca_request_timeout_seconds, connect=5),
         )
 
     def list_rca_reports(
@@ -134,7 +138,7 @@ class ApiClient:
         path: str,
         *,
         allow_statuses: set[int] | None = None,
-        timeout: float | None = None,
+        timeout: httpx.Timeout | float | None = None,
         **kwargs: Any,
     ) -> dict[str, Any]:
         try:
@@ -142,7 +146,13 @@ class ApiClient:
                 kwargs["timeout"] = timeout
             response = self._client.request(method, path, **kwargs)
         except httpx.TimeoutException as exc:
-            raise ApiClientError("The AI SRE API request timed out.") from exc
+            timeout_seconds = (
+                timeout.read if isinstance(timeout, httpx.Timeout) else timeout
+            )
+            message = "The AI SRE API request timed out."
+            if timeout_seconds is not None:
+                message = f"{message} Waited {timeout_seconds:g} seconds."
+            raise ApiClientError(message) from exc
         except httpx.HTTPError as exc:
             raise ApiClientError(f"Unable to reach the AI SRE API: {exc}") from exc
 
@@ -167,5 +177,21 @@ class ApiClient:
         if isinstance(error, dict):
             message = error.get("message")
             if isinstance(message, str):
+                details = error.get("details")
+                if isinstance(details, dict):
+                    validation_error = details.get("validation_error")
+                    if isinstance(validation_error, str):
+                        return f"{message} RCA validation failed: {validation_error}"
+                    validation_errors = details.get("validation_errors")
+                    if isinstance(validation_errors, list):
+                        issues = [
+                            f"{issue['location']}: {issue['message']}"
+                            for issue in validation_errors[:5]
+                            if isinstance(issue, dict)
+                            and isinstance(issue.get("location"), str)
+                            and isinstance(issue.get("message"), str)
+                        ]
+                        if issues:
+                            return f"{message} RCA response validation failed: {'; '.join(issues)}"
                 return message
         return f"AI SRE API returned HTTP {response.status_code}."
